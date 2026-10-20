@@ -59,8 +59,9 @@ CASES = {
 }
 
 
-def assert_matches(checkpoint: str, **kwargs) -> None:
-    ref, ours = forecasters(checkpoint)
+def assert_matches(checkpoint: str, ours: TimestralForecaster | None = None, **kwargs) -> None:
+    ref, default = forecasters(checkpoint)
+    ours = ours or default
     want = ref.forecast(**kwargs).quantiles.numpy()
     got = ours.forecast(**kwargs)
     assert isinstance(got, Forecast) and isinstance(got.quantiles, np.ndarray)
@@ -71,6 +72,17 @@ def assert_matches(checkpoint: str, **kwargs) -> None:
 @pytest.mark.parametrize("case", CASES)
 def test_forecast_matches_timestral(checkpoint: str, case: str) -> None:
     assert_matches(checkpoint, **CASES[case])
+
+
+@pytest.mark.parametrize("max_batch_rows", [1, 7, 64])
+def test_batch_chunking(checkpoint: str, max_batch_rows: int) -> None:
+    """12 series of 3 targets and 1 past covariate: 96 packed rows with symmetric averaging.
+
+    With 64 rows, each call decodes 16 series over the fused variate attention. With 7 or 1 rows, each call
+    decodes one series of 4 rows over the plain matmul and softmax.
+    """
+    assert_matches(checkpoint, TimestralForecaster.from_pretrained(checkpoint, max_batch_rows=max_batch_rows),
+                   context=series(12, 3, 200, seed=20), prediction_length=40, past_covariates=series(12, 1, 200, seed=21))
 
 
 @pytest.mark.parametrize("symmetric_averaging", [True, False])

@@ -1,6 +1,6 @@
 [project]
 name = "timestral-metal"
-version = "0.1.0"
+version = "0.1.1"
 description = "Mistral's Timestral time-series forecasting models on Apple silicon, with MLX"
 readme = "README.md"
 license = "Apache-2.0"

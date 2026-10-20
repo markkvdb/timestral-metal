@@ -95,6 +95,8 @@ class TimestralForecaster:
         quantile_real_cap_k: Clamp forecasts to `[min - k * s, max + k * s]` of the
             observed context, `s` being the scale of the last context patch. 0 disables.
         extreme_value_threshold: Fed-back medians at or above this magnitude become 0.
+        max_batch_rows: Packed rows (series x (variates + covariates)) per model call. A larger batch
+            is decoded in chunks of whole series. A series with more rows than this is decoded on its own.
     """
 
     def __init__(
@@ -104,14 +106,17 @@ class TimestralForecaster:
         per_shot_horizon_patches: int = 32,
         quantile_real_cap_k: float = 1e4,
         extreme_value_threshold: float = 1e30,
+        max_batch_rows: int = 64,
     ) -> None:
         assert per_shot_horizon_patches >= 1, f"per_shot_horizon_patches must be >= 1, got {per_shot_horizon_patches}"
+        assert max_batch_rows >= 1, f"max_batch_rows must be >= 1, got {max_batch_rows}"
         self.model = model
         self.config = model.config
         self.max_context = max_context if max_context is not None else model.config.context_length
         self.per_shot_horizon_patches = min(per_shot_horizon_patches, model.config.block_size)
         self.quantile_real_cap_k = quantile_real_cap_k
         self.extreme_value_threshold = extreme_value_threshold
+        self.max_batch_rows = max_batch_rows
         self.quantile_levels = tuple(model.config.quantile_knots)
         self.median_index = model.config.median_index
         # The refine step is many small operations, and runs once per decoded block.
@@ -128,15 +133,17 @@ class TimestralForecaster:
         cache_dir: str | Path | None = None,
         token: str | bool | None = None,
         local_files_only: bool = False,
+        max_batch_rows: int = 64,
     ) -> "TimestralForecaster":
         """Load an exported checkpoint (`config.json` + `model.safetensors`).
 
         `path_or_repo_id` is a local directory or a Hugging Face Hub repo id. `revision`,
-        `cache_dir`, `token` and `local_files_only` only apply to Hub repos.
+        `cache_dir`, `token` and `local_files_only` only apply to Hub repos. The other arguments are those
+        of `TimestralForecaster`.
         """
         model = load_model(path_or_repo_id, revision=revision, cache_dir=cache_dir, token=token,
                            local_files_only=local_files_only)
-        return cls(model, max_context, per_shot_horizon_patches, quantile_real_cap_k)
+        return cls(model, max_context, per_shot_horizon_patches, quantile_real_cap_k, max_batch_rows=max_batch_rows)
 
     @property
     def patch_size(self) -> int:
@@ -307,8 +314,21 @@ class TimestralForecaster:
         rows, mask, role_ids, known_future, known_future_mask, n_tgt = self._assemble_rows(
             inputs, observation_mask, prediction_length, past_covariates, known_covariates
         )
-        quantiles = self._block_ar_decode(rows, mask, prediction_length, role_ids, known_future, known_future_mask)
-        quantiles = quantiles[:, :n_tgt]
+        # Decode whole series in chunks of at most `max_batch_rows` packed rows. Evaluating each chunk before
+        # the next keeps the intermediate arrays of only one chunk in memory at a time.
+        b, v_all = rows.shape[:2]
+        step = max(1, self.max_batch_rows // v_all)
+        chunks = []
+        for start in range(0, b, step):
+            series, packed = slice(start, start + step), slice(start * v_all, (start + step) * v_all)
+            chunk = self._block_ar_decode(
+                rows[series], mask[series], prediction_length,
+                *(None if a is None else a[packed] for a in (role_ids, known_future, known_future_mask)),
+            )
+            if start + step < b:
+                mx.eval(chunk)
+            chunks.append(chunk)
+        quantiles = mx.concatenate(chunks)[:, :n_tgt]
         if self.quantile_real_cap_k > 0:
             quantiles = self._cap_quantiles(quantiles, rows[:, :n_tgt], mask[:, :n_tgt])
         return quantiles

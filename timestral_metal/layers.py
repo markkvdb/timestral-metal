@@ -14,6 +14,10 @@ import numpy as np
 
 from timestral_metal.config import LAYER_KIND_AXES
 
+# Variate attention runs over the rows of one model call. On 8 rows or fewer, a plain matmul and softmax
+# is about 3 times faster than MLX's fused attention kernel. On more rows, the fused kernel is faster.
+MAX_ROWS_FOR_PLAIN_ATTENTION = 8
+
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float) -> None:
@@ -110,12 +114,15 @@ class Attention(nn.Module):
             out = mx.fast.scaled_dot_product_attention(q, k, qkv[2], scale=hd**-0.5, mask="causal" if mask is None else mask)
             out = out.transpose(0, 2, 1, 3)
         else:
-            # Sequences of R rows are too short for the fused attention kernel to pay off.
             qkv = qkv.transpose(2, 1, 3, 0, 4)  # (3, N, heads, R, head_dim)
-            scores = (qkv[0] @ qkv[1].swapaxes(-1, -2)) * hd**-0.5
-            if mask is not None:
-                scores = mx.where(mask, scores, -mx.inf)
-            out = (mx.softmax(scores, axis=-1) @ qkv[2]).transpose(2, 0, 1, 3)
+            if rows > MAX_ROWS_FOR_PLAIN_ATTENTION:
+                out = mx.fast.scaled_dot_product_attention(qkv[0], qkv[1], qkv[2], scale=hd**-0.5, mask=mask)
+            else:
+                scores = (qkv[0] @ qkv[1].swapaxes(-1, -2)) * hd**-0.5
+                if mask is not None:
+                    scores = mx.where(mask, scores, -mx.inf)
+                out = mx.softmax(scores, axis=-1) @ qkv[2]
+            out = out.transpose(2, 0, 1, 3)
         out = out.reshape(rows, n, d)
         if self.gated:
             out = out * mx.sigmoid(proj[..., 3 * d :])

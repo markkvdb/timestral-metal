@@ -22,7 +22,7 @@ forecast = forecaster.forecast(context, prediction_length=96)
 forecast.median  # numpy array, (2, 1, 96)
 ```
 
-The API is `timestral`'s, documented in its [README](https://github.com/mistralai/timestral), with two differences: forecasts are numpy arrays, and there is no `device` argument.
+The API is `timestral`'s, documented in its [README](https://github.com/mistralai/timestral), with two differences: forecasts are numpy arrays, and there is no `device` argument. `TimestralForecaster` and `from_pretrained` also take `max_batch_rows` (see below).
 
 ## Performance
 
@@ -30,20 +30,20 @@ Time per forecast on an Apple M5 Pro, from `bench.py`, against `timestral` on th
 
 | Timestral-123M | timestral | timestral-metal | timestral-metal, full float32 |
 |---|---|---|---|
-| 2 series x 3 variates, 2,000-step context, 96 steps | 181 ms | 22 ms | 43 ms |
-| 1 series, 3,000-step context, 1,100 steps | 179 ms | 20 ms | 34 ms |
-| 1 series with 5 covariates, 32,768-step context, 48 steps | not measured | 395 ms | 797 ms |
+| 2 series x 3 variates, 2,000-step context, 96 steps | 179 ms | 22 ms | 43 ms |
+| 1 series, 3,000-step context, 1,100 steps | 173 ms | 20 ms | 34 ms |
+| 1 series with 5 covariates, 32,768-step context, 48 steps | not measured | 392 ms | 789 ms |
 
-The covariate case peaks at 2.1 GB of memory.
+The covariate case peaks at 2.1 GB of memory. A batch of 128 series of 3 variates, with full float32, takes 2.5 s (20 ms per series) and peaks at 2.3 GB. `max_batch_rows` (default 64) sets how many packed rows of series, variates and covariates go into one model call. Larger batches are decoded in chunks of whole series, which keeps memory bounded.
 
 ## Changes from timestral
 
 Besides running on the GPU, `timestral-metal` changes these parts of `timestral`'s computation. The forecasts stay the same within float32 rounding.
 
-- With covariates, the model creates decoder tokens for the horizon patches only. `timestral` creates one for every patch of the window and keeps the predictions of the horizon patches. The other decoder tokens do not affect the forecast. Leaving them out halves the time of covariate forecasts, from 804 ms to 395 ms in the case above.
+- With covariates, the model creates decoder tokens for the horizon patches only. `timestral` creates one for every patch of the window and keeps the predictions of the horizon patches. The other decoder tokens do not affect the forecast. Leaving them out halves the time of covariate forecasts, from 804 ms to 392 ms in the case above.
 - The forecast of the context and the forecast of its negation, which symmetric averaging combines, run as one batch instead of two calls. This saves 4 to 5 ms per forecast on Timestral-123M.
 - Each attention computes Q, K, V and its output gate with one matrix product, saving up to 0.5 ms per model call on Timestral-123M. `load_model` reorders the checkpoint's QKV weights from (qkv, head_dim, heads) to (qkv, heads, head_dim) and appends the gate weights.
-- Variate attention, which runs over the few variates of one series, uses a plain matrix product and softmax. On sequences this short it is 3 to 4 times faster than MLX's fused attention kernel.
+- Variate attention runs over the rows of one model call. For 8 rows or fewer, it uses a plain matrix product and softmax, which is about 3 times faster than MLX's fused attention kernel at that size. For more rows, it uses the fused kernel.
 - Apple GPUs have no float64. To keep the normalisation statistics on the GPU, they are computed in float32: each row is shifted by its first observed value before the sums, and per-patch statistics are combined with a log-depth scan. `timestral` computes them in float64.
 - `mx.compile` compiles the transformer layers, saving 5 to 10% of their time, and the refine step that runs after each decoded block, saving about 10% on forecasts of more than one block.
 
