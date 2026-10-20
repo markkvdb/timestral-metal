@@ -1,0 +1,37 @@
+[project]
+name = "timestral-metal"
+version = "0.1.0"
+description = "Mistral's Timestral time-series forecasting models on Apple silicon, with MLX"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Mark van der Broek", email = "github@mvanderbroek.com" }]
+requires-python = ">=3.11"
+dependencies = [
+    "huggingface_hub>=0.23",
+    "mlx>=0.32",
+    "numpy>=1.24",
+]
+
+[project.urls]
+Homepage = "https://github.com/markkvdb/timestral-metal"
+Issues = "https://github.com/markkvdb/timestral-metal/issues"
+Upstream = "https://github.com/mistralai/timestral"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "timestral @ git+https://github.com/mistralai/timestral.git@a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff",
+    "torch>=2.4",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+
+[tool.pytest.ini_options]
+markers = ["slow: needs the Timestral-123M weights (490 MB)"]
+addopts = "-m 'not slow'"
